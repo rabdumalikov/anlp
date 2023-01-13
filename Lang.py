@@ -3,8 +3,8 @@ import pickle
 
 class Lang:
     # Static variables
-    SOS_token = 0
-    EOS_token = 1
+    SOS_token = 1
+    EOS_token = 2
 
     def __init__(self, name):
         """Initiates a language object containing a vocabulary of words and their
@@ -16,8 +16,8 @@ class Lang:
         self.name = name
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {self.SOS_token: "SOS", self.EOS_token: "EOS"}
-        self.n_words = 2  # Count SOS and EOS
+        self.index2word = {self.SOS_token: "<SOS>", self.EOS_token: "<EOS>"}
+        self.n_words = 3  # Count SOS and EOS
 
     def add_sentence(self, sentence):
         """Adds a sencente to the vocabulary by splitting by spaces and adding each word
@@ -41,6 +41,9 @@ class Lang:
             self.n_words += 1                     # Increment the number of words
         else:
             self.word2count[word] += 1            # Increment the count of the word
+
+    def print(self):
+        print(f'word2index: {self.word2index}')
 
     def save(self, filename):
         """Saves the language object to a file

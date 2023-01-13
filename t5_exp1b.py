@@ -4,16 +4,32 @@ from transformers import AutoTokenizer, AutoModel, AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset, random_split
 from transformers import AdamW, GPT2Tokenizer, GPT2LMHeadModel
 # Importing the T5 modules from huggingface/transformers
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+from transformers import T5Tokenizer, T5ForConditionalGeneration, T5Config
 import os
 import re
 import pandas as pd
 import torch.nn as nn
 import numpy as np
 import learn2learn as l2l
+import Lang
 
 scan_ds = load_dataset('scan', 'simple')
-print( scan_ds['train'] )
+
+seq_vocab = Lang.Lang('seq_vocab')
+cmd_vocab = Lang.Lang('cmd_vocab')
+
+for sentence in scan_ds['train']['commands']:
+    seq_vocab.add_sentence(sentence)
+for sentence in scan_ds['test']['commands']:
+    seq_vocab.add_sentence(sentence)
+
+for cmd in scan_ds['train']['actions']:
+    cmd_vocab.add_sentence(cmd)
+for cmd in scan_ds['test']['actions']:
+    cmd_vocab.add_sentence(cmd)
+
+seq_vocab.print()
+cmd_vocab.print()
 
 # read file names in directory
 directory = '../SCAN/simple_split/size_variations/'
@@ -89,12 +105,14 @@ for k in datasets.keys():
     
 model_name = 't5-small'
 
-tokenizer = T5Tokenizer.from_pretrained( model_name, do_lower_case=True, model_max_length=512)
-
+tokenizer = T5Tokenizer( 'm.model', do_lower_case=True, do_basic_tokenize=True, 
+                               padding=True, bos_token="<s>", 
+                               eos_token="</s>",unk_token="<unk>", 
+                               pad_token="<pad>")
 
 SPECIAL_TOKENS_DICT = {
     'pad_token' : '<pad>',
-    'additional_special_tokens' : ['<start>', '<end>']
+    'additional_special_tokens' : ['<s>', '</s>']
 }
 
 tokenizer.add_special_tokens( SPECIAL_TOKENS_DICT ) 
@@ -130,7 +148,7 @@ def collate_fn( input ):
         #print( f'seq: {tokenizer.encode_plus(seq)} cmds: {len(cmds.split())}')
 
         source_dict = tokenizer.encode_plus(
-                            seq + ' <start>', # Sentence to encode.
+                            seq, # Sentence to encode.
                             max_length = max_len_seq,      # Pad & truncate all sentences.
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
@@ -139,7 +157,7 @@ def collate_fn( input ):
                     )
 
         target_dict = tokenizer.encode_plus(
-                            '<start>' + cmds + '<end>', # Sentence to encode.
+                            "<s>" + cmds + "</s>", # Sentence to encode.
                             max_length = max_len_cmds,      # Pad & truncate all sentences.
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
@@ -147,7 +165,7 @@ def collate_fn( input ):
                             return_tensors = 'pt',     # Return pytorch tensors.
                     )
 
-        print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
+        #print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
 
         src_input_ids.append( source_dict['input_ids'] )
         src_attention_masks.append( source_dict['attention_mask'] )
@@ -169,7 +187,7 @@ device = torch.device("cpu")
 if torch.cuda.is_available():    
     device = torch.device("cuda")
 
-epochs = 100
+epochs = 2000
 print( "Started training...")
 best_acc = 0.0
 
@@ -180,7 +198,16 @@ beta = 1e-5 #0.001
 
 train, test = datasets_wrapper[1] 
 
-model = T5ForConditionalGeneration.from_pretrained( model_name ).to(device)
+config = T5Config(
+    vocab_size = tokenizer.vocab_size,
+    pad_token_id = tokenizer.pad_token_id,
+    eos_token_id = tokenizer.eos_token_id,
+    decoder_start_token_id = tokenizer.pad_token_id,
+    d_model = 500
+)
+
+#model = T5ForConditionalGeneration.from_pretrained( model_name ).to(device)
+model = T5ForConditionalGeneration( config ).to(device)
 model.resize_token_embeddings( len(tokenizer) )
 
 optimizer = torch.optim.AdamW( model.parameters(), lr=beta)
@@ -209,10 +236,10 @@ def validate( tokenizer, model, device, loader ):
             generated_ids = model.generate(
                 input_ids = src_ids,
                 attention_mask = src_am, 
-                max_length=150, 
+#                max_length=150, 
                 num_beams=2,
-                repetition_penalty=2.5, 
-                length_penalty=1.0, 
+                #repetition_penalty=2.5, 
+                #length_penalty=1.0, 
                 early_stopping=True
                 )
             preds = [tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True) for g in generated_ids]
@@ -230,6 +257,8 @@ test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), co
 train_loader = DataLoader( list(zip(train.data()['Seq'], train.data()['Cmds'])), collate_fn=collate_fn, batch_size=8)
 
 for e in range(epochs):
+
+    model.train()
 
     meta_train_loss = 0.0
 
