@@ -84,8 +84,6 @@ datasets_wrapper = {}
 for k in datasets.keys():
     datasets_wrapper[k] = (MyDataset( datasets[k][0] ), MyDataset( datasets[k][1] ) )
     
-model_name = 'xlm-roberta-base'
-
 model_name = 't5-small'
 
 tokenizer = T5Tokenizer.from_pretrained( model_name, do_lower_case=True, model_max_length=512)
@@ -104,15 +102,32 @@ def collate_fn( input ):
     src_attention_masks = []
     trg_attention_masks = []
 
-    max_len = 9
+    max_len_seq = 0
+    max_len_cmds = 0
 
     for inp in input:
         seq  = inp[0]
         cmds = inp[1]
-    
+
+        source_ids = tokenizer.encode_plus(seq)['input_ids']
+        target_ids = tokenizer.encode_plus(cmds)['input_ids']
+
+        if max_len_seq < len(source_ids):
+            max_len_seq = len(source_ids)
+
+        if max_len_cmds < len(target_ids):
+            max_len_cmds = len(target_ids)
+
+    #print( f'max_len_seq: {max_len_seq} max_len_cmds: {max_len_cmds}' )
+
+    for inp in input:
+        seq  = inp[0]
+        cmds = inp[1]
+        #print( f'seq: {tokenizer.encode_plus(seq)} cmds: {len(cmds.split())}')
+
         source_dict = tokenizer.encode_plus(
-                            [seq], # Sentence to encode.
-                            max_length = max_len,      # Pad & truncate all sentences.
+                            seq, # Sentence to encode.
+                            max_length = max_len_seq,      # Pad & truncate all sentences.
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
                             truncation = True,
@@ -120,13 +135,15 @@ def collate_fn( input ):
                     )
 
         target_dict = tokenizer.encode_plus(
-                            [cmds], # Sentence to encode.
-                            max_length = 48,      # Pad & truncate all sentences.
+                            cmds, # Sentence to encode.
+                            max_length = max_len_cmds,      # Pad & truncate all sentences.
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
                             truncation = True,
                             return_tensors = 'pt',     # Return pytorch tensors.
                     )
+
+        #print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
 
         src_input_ids.append( source_dict['input_ids'] )
         src_attention_masks.append( source_dict['attention_mask'] )
@@ -148,12 +165,12 @@ device = torch.device("cpu")
 if torch.cuda.is_available():    
     device = torch.device("cuda")
 
-epochs = 2
+epochs = 100
 print( "Started training...")
 best_acc = 0.0
 
 torch.autograd.set_detect_anomaly(True)
-K = 10
+K = 100
 alpha = 0.01
 beta = 0.001
 
@@ -162,40 +179,96 @@ train, test = datasets_wrapper[1]
 model = T5ForConditionalGeneration.from_pretrained( model_name ).to(device)
 model.resize_token_embeddings( len(tokenizer) )
 
-malm = l2l.algorithms.MAML(model, lr=alpha, first_order=False)
-
-#print(dir(model))
+malm = l2l.algorithms.MAML(model, lr=alpha, first_order=False).to(device)
 optimizer = torch.optim.AdamW( malm.parameters(), lr=beta)
-#weights = list(model.parameters())
-loss_fn = nn.CrossEntropyLoss()
 adapt_steps = 1
 
-for e in range(epochs):
+batch_size = 5
 
-    sample = train.data().sample(n=2*K)
-
+def create_dataloader( dataset, batch_size ):
     X_train = sample[:K]['Seq']
     y_train = sample[:K]['Cmds']
 
     X_test = sample[K:]['Seq']
     y_test = sample[K:]['Cmds']
 
-    dl = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=1)
-    dl_test = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=1)
-    
+    dl = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=K)
+    dl_test = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=K)
+
+def validate( tokenizer, model, device, loader ):
+
+  model.eval()
+
+  predictions = []
+  actuals = []
+  
+  with torch.no_grad():
+        for _, data in enumerate(loader, 0):
+            src_ids = data[0][0].unsqueeze(dim=0).to(device)
+            src_am  = data[0][1].unsqueeze(dim=0).to(device)
+            trg_ids = data[0][2].unsqueeze(dim=0).to(device)
+            #trg_am  = data[0][3].unsqueeze(dim=0).to(device)
+
+            #y_ids = trg_ids[:,:-1].contiguous()
+            #lm_labels = trg_ids[:,1:].clone().detach()
+            #lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
+
+            generated_ids = model.generate(
+                input_ids = src_ids,
+                attention_mask = src_am, 
+                max_length=150, 
+                num_beams=2,
+                repetition_penalty=2.5, 
+                length_penalty=1.0, 
+                early_stopping=True
+                )
+            preds = [tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True) for g in generated_ids]
+            target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True)for t in trg_ids]
+                        
+            predictions.extend(preds)
+            actuals.extend(target)
+            #print( f'preds: {preds} target: {target}' )
+            break
+
+  return predictions, actuals
+
+test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), collate_fn=collate_fn, batch_size=1)
+
+for e in range(epochs):
+
     meta_train_loss = 0.0
 
-    for tens in dl:
+    for i in range(batch_size):
+        sample = train.data().sample(n=2*K)
+
+        X_train = sample[:K]['Seq']
+        y_train = sample[:K]['Cmds']
+
+        X_test = sample[K:]['Seq']
+        y_test = sample[K:]['Cmds']
+
+        dl = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=K)
+        dl_test = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=K)
+        
+        train_batch = next(iter(dl))
+        test_batch = next(iter(dl_test))
+        
         learner = malm.clone()
 
-        src_ids = tens[0][0].unsqueeze(dim=0).to(device)
-        src_am  = tens[0][1].unsqueeze(dim=0).to(device)
-        trg_ids = tens[0][2].unsqueeze(dim=0).to(device)
-        trg_am  = tens[0][3].unsqueeze(dim=0).to(device)
+        src_ids = train_batch[0][0].unsqueeze(dim=0).to(device)
+        src_am  = train_batch[0][1].unsqueeze(dim=0).to(device)
+        trg_ids = train_batch[0][2].unsqueeze(dim=0).to(device)
+        trg_am  = train_batch[0][3].unsqueeze(dim=0).to(device)
 
         y_ids = trg_ids[:,:-1].contiguous()
         lm_labels = trg_ids[:,1:].clone().detach()
         lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
+
+        #print( f'trg_ids: {trg_ids}' )
+        #print( f'y_ids: {y_ids}' )
+        
+        #print( f'lm_labels: {tokenizer.decode(src_ids[0])}' )
+        #print( f'lm_labels: {tokenizer.decode(trg_ids[0])}' )
 
         for _ in range(adapt_steps):
             outputs = learner(            
@@ -208,39 +281,31 @@ for e in range(epochs):
 
             learner.adapt(train_loss)
         
-        for t in dl_test:
-            src_ids = t[0][0].unsqueeze(dim=0).to(device)
-            src_am  = t[0][1].unsqueeze(dim=0).to(device)
-            trg_ids = t[0][2].unsqueeze(dim=0).to(device)
-            trg_am  = t[0][3].unsqueeze(dim=0).to(device)
+        src_ids = test_batch[0][0].unsqueeze(dim=0).to(device)
+        src_am  = test_batch[0][1].unsqueeze(dim=0).to(device)
+        trg_ids = test_batch[0][2].unsqueeze(dim=0).to(device)
+        trg_am  = test_batch[0][3].unsqueeze(dim=0).to(device)
 
-            y_ids = trg_ids[:,:-1].contiguous()
-            lm_labels = trg_ids[:,1:].clone().detach()
-            lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
+        y_ids = trg_ids[:,:-1].contiguous()
+        lm_labels = trg_ids[:,1:].clone().detach()
+        lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
 
-            outputs = learner(            
-                input_ids=src_ids,
-                attention_mask=src_am,
-                decoder_input_ids=y_ids,
-                labels=lm_labels)
-
-            meta_train_loss += outputs[0]
+        outputs = learner(            
+            input_ids=src_ids,
+            attention_mask=src_am,
+            decoder_input_ids=y_ids,
+            labels=lm_labels)
 
 
-        exit()
+        meta_train_loss += outputs[0]    
 
-        model.load_state_dict( dict(zip(model.state_dict().keys(), temp_weights)) )
-
-        test_loss = loss_fn(y_test, model(X_test))
-
-        meta_train_loss += test_loss
+    print( f'meta_train_loss: {meta_train_loss.item()}')
+    
+    validate( tokenizer, model, device, test_loader )
 
     optimizer.zero_grad()
     meta_train_loss.backward()
     optimizer.step()
-
-    print( f'meta_train_loss: {meta_train_loss}' )
-
 
 exit()
 
