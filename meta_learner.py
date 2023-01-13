@@ -11,6 +11,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
+import learn2learn as l2l
+
 from task_generator import RegressionTaskGenerator
 
 def load_model(source, target) :
@@ -59,19 +61,21 @@ class MetaLearner(nn.Module):
 
         self.model = MLP()
 
-        self.weights = []
+        self.malm = l2l.algorithms.MAML(self.model, lr=self.alpha, first_order=False)
 
-        self.param_names = []
-        for name, param in self.model.named_parameters():
-            #if param.requires_grad:
-            #print(name, param.requires_grad)
-            self.weights.append(param)
-            self.param_names.append(name)
+        # self.weights = []
 
-        print( self.param_names )
+        # self.param_names = []
+        # for name, param in self.model.named_parameters():
+        #     #if param.requires_grad:
+        #     #print(name, param.requires_grad)
+        #     self.weights.append(param)
+        #     self.param_names.append(name)
+
+        # print( self.param_names )
 
         #self.weights = [ if sd[k].require_grad for k in sd.keys() ]
-        self.meta_optimizer = optim.Adam(self.weights, lr=self.beta)
+        self.meta_optimizer = optim.Adam(self.malm.parameters(), lr=self.beta)
 
         log_dir = f'./runs/MAML_{task}' + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.writer = SummaryWriter(log_dir)
@@ -80,47 +84,59 @@ class MetaLearner(nn.Module):
     def train_step(self, batch_size=10, k=10):
         meta_train_loss = 0.0
         
-        model2 = copy.deepcopy(self.model)
-        meta_optimizer2 = optim.Adam(model2.parameters(), lr=self.beta)
+        #model2 = copy.deepcopy(self.model)
+        #meta_optimizer2 = optim.Adam(model2.parameters(), lr=self.beta)
+        
+        adapt_steps=5
 
         for i in range(batch_size):
+            learner = self.malm.clone()
 
+            #sd = self.model.state_dict().copy()
+            #temp_weights = [w.clone() for w in self.weights]
 
-            sd = self.model.state_dict().copy()
-            temp_weights = [w.clone() for w in self.weights]
             x, y, _, _ = self.task_generator.get_task(num_samples=2*k)
             train_x, test_x = x[:k], x[k:]
             train_y, test_y = y[:k], y[k:]
 
-            train_loss = self.loss_fn(train_y, self.model(train_x))
-            grad = torch.autograd.grad(train_loss, self.weights)
+            for _ in range(adapt_steps): # adaptation_steps
+                support_preds = learner(train_x)
+                support_loss=self.loss_fn(support_preds, train_y)
+                learner.adapt(support_loss)
 
-            temp_weights = [ w - self.alpha * g for w, g in zip(self.weights, grad)]
+            #train_loss = self.loss_fn(train_y, self.model(train_x))
+            #grad = torch.autograd.grad(train_loss, self.weights)
+
+            query_preds = learner(test_x)
+            query_loss = self.loss_fn(query_preds, test_y)
+            meta_train_loss += query_loss
+
+            # temp_weights = [ w - self.alpha * g for w, g in zip(self.weights, grad)]
   
-            for j, w in enumerate(temp_weights):
-                sd[self.param_names[j]] = w
+            # for j, w in enumerate(temp_weights):
+            #     sd[self.param_names[j]] = w
 
-            model2.load_state_dict(sd)
+            # model2.load_state_dict(sd)
 
-            res = torch.all(model2(test_x) == self.model.parameterised(test_x, temp_weights) )
-            if res == False:
-                print( 'Error' )
-                exit()
+            # res = torch.all(model2(test_x) == self.model.parameterised(test_x, temp_weights) )
+            # if res == False:
+            #     print( 'Error' )
+            #     exit()
 
-            test_loss = self.loss_fn(test_y, model2(test_x))
-            test_loss2 = self.loss_fn(test_y, self.model.parameterised(test_x, temp_weights) )
-            if test_loss != test_loss2:
-                print( 'Error2' )
-                exit()
+            # test_loss = self.loss_fn(test_y, model2(test_x))
+            # test_loss2 = self.loss_fn(test_y, self.model.parameterised(test_x, temp_weights) )
+            # if test_loss != test_loss2:
+            #     print( 'Error2' )
+            #     exit()
 
             #print( f'test_loss={test_loss}, test_loss2={test_loss2}' )
             #exit()
-            meta_train_loss += test_loss
+            #meta_train_loss += test_loss
 
         self.meta_optimizer.zero_grad()
-        meta_optimizer2.zero_grad()
+        #meta_optimizer2.zero_grad()
         meta_train_loss.backward()
-        meta_optimizer2.step()
+        self.meta_optimizer.step()
 
         #self.model = copy.deepcopy(model2)
         #self.meta_optimizer.step()
@@ -137,7 +153,7 @@ class MetaLearner(nn.Module):
         print( f'x.sz={len(x)}')
 
         t = torch.FloatTensor(np.arange(-5.0, 5.0, 0.1)).reshape(-1, 1)
-        pre_update = self.model(t).detach()
+        pre_update = self.malm(t).detach()
 
         test_model = MLP()
         load_model(self.model, test_model)

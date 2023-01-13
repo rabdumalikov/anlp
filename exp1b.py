@@ -10,6 +10,7 @@ import re
 import pandas as pd
 import torch.nn as nn
 import numpy as np
+import learn2learn as l2l
 
 # read file names in directory
 directory = '../SCAN/simple_split/size_variations/'
@@ -161,10 +162,13 @@ train, test = datasets_wrapper[1]
 model = T5ForConditionalGeneration.from_pretrained( model_name ).to(device)
 model.resize_token_embeddings( len(tokenizer) )
 
+malm = l2l.algorithms.MAML(model, lr=alpha, first_order=False)
+
 #print(dir(model))
-optimizer = torch.optim.AdamW( model.parameters(), lr=1e-5, eps=1e-8)
-weights = list(model.parameters())
+optimizer = torch.optim.AdamW( malm.parameters(), lr=beta)
+#weights = list(model.parameters())
 loss_fn = nn.CrossEntropyLoss()
+adapt_steps = 1
 
 for e in range(epochs):
 
@@ -177,10 +181,13 @@ for e in range(epochs):
     y_test = sample[K:]['Cmds']
 
     dl = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=1)
+    dl_test = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=1)
     
     meta_train_loss = 0.0
 
     for tens in dl:
+        learner = malm.clone()
+
         src_ids = tens[0][0].unsqueeze(dim=0).to(device)
         src_am  = tens[0][1].unsqueeze(dim=0).to(device)
         trg_ids = tens[0][2].unsqueeze(dim=0).to(device)
@@ -190,23 +197,36 @@ for e in range(epochs):
         lm_labels = trg_ids[:,1:].clone().detach()
         lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
 
-        print( src_ids.shape, src_am.shape, y_ids.shape, lm_labels.shape )
+        for _ in range(adapt_steps):
+            outputs = learner(            
+                input_ids=src_ids,
+                attention_mask=src_am,
+                decoder_input_ids=y_ids,
+                labels=lm_labels)
 
-        temp_weights = [w.clone() for w in weights]
+            train_loss = outputs[0]
 
-        outputs = model(
-            input_ids=src_ids,
-            attention_mask=src_am,
-            decoder_input_ids=y_ids,
-            labels=lm_labels,
-        )
+            learner.adapt(train_loss)
+        
+        for t in dl_test:
+            src_ids = t[0][0].unsqueeze(dim=0).to(device)
+            src_am  = t[0][1].unsqueeze(dim=0).to(device)
+            trg_ids = t[0][2].unsqueeze(dim=0).to(device)
+            trg_am  = t[0][3].unsqueeze(dim=0).to(device)
 
-        train_loss = outputs[0]
+            y_ids = trg_ids[:,:-1].contiguous()
+            lm_labels = trg_ids[:,1:].clone().detach()
+            lm_labels[trg_ids[:,1:] == tokenizer.pad_token_id] = -100
 
-        grad = torch.autograd.grad(train_loss, weights)
-        temp_weights = [ (w - alpha * g).tolist() for w, g in zip(weights, grad)]
+            outputs = learner(            
+                input_ids=src_ids,
+                attention_mask=src_am,
+                decoder_input_ids=y_ids,
+                labels=lm_labels)
 
-        print( nn.Parameter( temp_weights ) )
+            meta_train_loss += outputs[0]
+
+
         exit()
 
         model.load_state_dict( dict(zip(model.state_dict().keys(), temp_weights)) )
