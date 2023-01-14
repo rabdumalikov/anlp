@@ -240,7 +240,7 @@ def validate( tokenizer, model, device, loader ):
 best_results = {}
 
 for k in datasets_wrapper.keys():
-
+    k = 1
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
@@ -300,5 +300,6 @@ for k in datasets_wrapper.keys():
         print( f'\t{k}:{e}: meta_train_loss: {meta_train_loss}, acc={acc}')
     
     print("\n============================\n")
+    break
 
 print( f'best_results={best_results}' )

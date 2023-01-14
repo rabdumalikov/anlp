@@ -2,7 +2,7 @@
 
 #SBATCH --partition=gpu
 #SBATCH -J t5_scan
-#SBATCH -o ./megalog.out # STDOUT
+#SBATCH -o ./metalog.out # STDOUT
 
 #SBATCH -t 48:00:00
 #SBATCH --ntasks=1
@@ -13,6 +13,6 @@
 
 echo "Started..."
 
-python -u t5_exp1b.py
+python -u ml_t5_exp1b.py
 
 echo "Ended."

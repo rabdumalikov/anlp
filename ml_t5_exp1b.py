@@ -1,10 +1,7 @@
 import torch
 from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer, AutoModel, AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset, random_split
-from transformers import AdamW, GPT2Tokenizer, GPT2LMHeadModel
-# Importing the T5 modules from huggingface/transformers
-from transformers import T5Tokenizer, T5ForConditionalGeneration, T5Config
+from transformers import T5Tokenizer, T5ForConditionalGeneration, T5Config, AdamW
 import os
 import re
 import pandas as pd
@@ -12,24 +9,6 @@ import torch.nn as nn
 import numpy as np
 import learn2learn as l2l
 import Lang
-
-# scan_ds = load_dataset('scan', 'simple')
-
-# seq_vocab = Lang.Lang('seq_vocab')
-# cmd_vocab = Lang.Lang('cmd_vocab')
-# print(scan_ds['train']) 
-# for sentence in scan_ds['train']['commands']:
-#     seq_vocab.add_sentence(sentence)
-# for sentence in scan_ds['test']['commands']:
-#     seq_vocab.add_sentence(sentence)
-
-# for cmd in scan_ds['train']['actions']:
-#     cmd_vocab.add_sentence(cmd)
-# for cmd in scan_ds['test']['actions']:
-#     cmd_vocab.add_sentence(cmd)
-
-# seq_vocab.print()
-# cmd_vocab.print()
 
 # read file names in directory
 directory = '../SCAN/simple_split/size_variations/'
@@ -140,14 +119,9 @@ def collate_fn( input ):
         if max_len_cmds < len(target_ids):
             max_len_cmds = len(target_ids)
 
-    #print( f'max_len_seq: {max_len_seq} max_len_cmds: {max_len_cmds}' )
-
-    #print(f'input: {len(input)}')
-
     for inp in input:
         seq  = inp[0]
         cmds = inp[1]
-        #print( f'seq: {tokenizer.encode_plus(seq)} cmds: {len(cmds.split())}')
 
         source_dict = tokenizer.encode_plus(
                             seq + " </s>", # Sentence to encode.
@@ -166,8 +140,6 @@ def collate_fn( input ):
                             truncation = True,
                             return_tensors = 'pt',     # Return pytorch tensors.
                     )
-
-        #print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
 
         src_input_ids.append( source_dict['input_ids'] )
         src_attention_masks.append( source_dict['attention_mask'] )
@@ -238,22 +210,25 @@ def validate( tokenizer, model, device, loader ):
   return np.array( predictions ), np.array( actuals )
 
 best_results = {}
+num_samplings = 10
 
 for k in datasets_wrapper.keys():
-
+    k = 1
+    
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
-    optimizer = torch.optim.AdamW( model.parameters(), lr=beta)
-    adapt_steps = 1
+    malm = l2l.algorithms.MAML(model, lr=alpha, first_order=False).to(device)
+    optimizer = torch.optim.AdamW( malm.parameters(), lr=beta)
+    adapt_steps = 5
 
     train, test = datasets_wrapper[k] 
 
     print(f'Started training for {k}')
     print( f'train.sz={len(train.data())} test.sz={len(test.data())}' )
 
-    test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
-    train_loader = DataLoader( list(zip(train.data()['Seq'], train.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
+    #test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
+    #train_loader = DataLoader( list(zip(train.data()['Seq'], train.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
 
     acc = 0.0
 
@@ -263,31 +238,64 @@ for k in datasets_wrapper.keys():
 
         meta_train_loss = 0.0
 
-        for train_batch in train_loader:
-                    
-            src_ids = train_batch[0].to(device)
-            src_am  = train_batch[1].to(device)
-            trg_ids = train_batch[2].to(device)
-            trg_am  = train_batch[3].to(device)
+        for _ in num_samplings:
 
-            y_ids = trg_ids.contiguous()
-            lm_labels = trg_ids.clone().detach()
-            lm_labels[trg_ids == tokenizer.pad_token_id] = -100
+            leaner = malm.clone()
             
-            outputs = model(            
-                input_ids=src_ids,
-                attention_mask=src_am,
-                labels=lm_labels )
+            sample = train.data().sample(n=2*K)
 
-            train_loss = outputs[0]
+            X_train = sample[:K]['Seq']
+            y_train = sample[:K]['Cmds']
 
-            meta_train_loss += train_loss.item()
+            X_test = sample[K:]['Seq']
+            y_test = sample[K:]['Cmds']
+
+            train_loader = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=K)
+            test_loader = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=K)
+
+            for train_batch in train_loader:
+                        
+                src_ids = train_batch[0].to(device)
+                src_am  = train_batch[1].to(device)
+                trg_ids = train_batch[2].to(device)
+
+                lm_labels = trg_ids.clone().detach()
+                lm_labels[trg_ids == tokenizer.pad_token_id] = -100
+                
+                for _ in range(adapt_steps):
+
+                    outputs = learner(            
+                        input_ids=src_ids,
+                        attention_mask=src_am,
+                        labels=lm_labels )
+
+                    train_loss = outputs[0]
+
+                    learner.adapt(train_loss)
+
+                for test_batch in test_loader:
+                        
+                    src_ids = test_batch[0].to(device)
+                    src_am  = test_batch[1].to(device)
+                    trg_ids = test_batch[2].to(device)
+
+                    lm_labels = trg_ids.clone().detach()
+                    lm_labels[trg_ids == tokenizer.pad_token_id] = -100
+
+                    outputs = learner(            
+                        input_ids=src_ids,
+                        attention_mask=src_am,
+                        labels=lm_labels )
+
+                    test_loss = outputs[0]
+
+                    meta_train_loss += test_loss
 
             optimizer.zero_grad()
-            train_loss.backward()
+            meta_train_loss.backward()
             optimizer.step()
 
-        if e % 5 == 0:
+#            if e % 5 == 0:
             preds, actuals = validate( tokenizer, model, device, test_loader )
             prev_acc = acc
             acc = sum(preds == actuals) / len(actuals)
@@ -295,10 +303,11 @@ for k in datasets_wrapper.keys():
             if acc > prev_acc:
                 best_results[k] = acc
 
-            print( '\tAcc updated!' )
+            #print( '\tAcc updated!' )
 
-        print( f'\t{k}:{e}: meta_train_loss: {meta_train_loss}, acc={acc}')
+            print( f'\t{k}:{e}: meta_train_loss: {meta_train_loss}, acc={acc}')
     
     print("\n============================\n")
+    break
 
 print( f'best_results={best_results}' )
