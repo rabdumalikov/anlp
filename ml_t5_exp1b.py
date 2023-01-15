@@ -162,14 +162,14 @@ device = torch.device("cpu")
 if torch.cuda.is_available():    
     device = torch.device("cuda")
 
-epochs = 300
+epochs = 601
 print( "Started training...")
 best_acc = 0.0
 
 torch.autograd.set_detect_anomaly(True)
 K = 100
 alpha = 0.01
-beta = 1e-5 #0.001
+beta = 0.001
 
 config = T5Config(
     vocab_size = tokenizer.vocab_size,
@@ -210,11 +210,11 @@ def validate( tokenizer, model, device, loader ):
   return np.array( predictions ), np.array( actuals )
 
 best_results = {}
-num_samplings = 10
+num_samplings = 5
 
 for k in datasets_wrapper.keys():
-    k = 1
-    
+    k = 16
+
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
@@ -224,34 +224,38 @@ for k in datasets_wrapper.keys():
 
     train, test = datasets_wrapper[k] 
 
+    n = len(train.data())
+    K = 10 #n // 2
+
     print(f'Started training for {k}')
     print( f'train.sz={len(train.data())} test.sz={len(test.data())}' )
 
-    #test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
+    real_test_loader = DataLoader( list(zip(test.data()['Seq'], test.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
     #train_loader = DataLoader( list(zip(train.data()['Seq'], train.data()['Cmds'])), collate_fn=collate_fn, batch_size=64)
 
     acc = 0.0
 
-    for e in range(epochs):
+    for e in range(1, epochs):
 
         model.train()
 
-        meta_train_loss = 0.0
+        for _ in range(num_samplings):
 
-        for _ in num_samplings:
+            meta_train_loss = 0.0
 
-            leaner = malm.clone()
+            learner = malm.clone()
             
-            sample = train.data().sample(n=2*K)
+            train_sample = train.data().sample(n=K)
+            test_sample = train.data().sample(n=K) #train.data()[ ~train.data().index.isin(train_sample.index) ]
 
-            X_train = sample[:K]['Seq']
-            y_train = sample[:K]['Cmds']
+            X_train = train_sample['Seq']
+            y_train = train_sample['Cmds']
 
-            X_test = sample[K:]['Seq']
-            y_test = sample[K:]['Cmds']
+            X_test = test_sample['Seq']
+            y_test = test_sample['Cmds']
 
-            train_loader = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=K)
-            test_loader = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=K)
+            train_loader = DataLoader( list(zip(X_train, y_train)), collate_fn=collate_fn, batch_size=64)
+            test_loader = DataLoader( list(zip(X_test, y_test)), collate_fn=collate_fn, batch_size=64)
 
             for train_batch in train_loader:
                         
@@ -272,41 +276,39 @@ for k in datasets_wrapper.keys():
                     train_loss = outputs[0]
 
                     learner.adapt(train_loss)
+                
+            for test_batch in test_loader:
+                    
+                src_ids = test_batch[0].to(device)
+                src_am  = test_batch[1].to(device)
+                trg_ids = test_batch[2].to(device)
 
-                for test_batch in test_loader:
-                        
-                    src_ids = test_batch[0].to(device)
-                    src_am  = test_batch[1].to(device)
-                    trg_ids = test_batch[2].to(device)
+                lm_labels = trg_ids.clone().detach()
+                lm_labels[trg_ids == tokenizer.pad_token_id] = -100
 
-                    lm_labels = trg_ids.clone().detach()
-                    lm_labels[trg_ids == tokenizer.pad_token_id] = -100
+                outputs = learner(            
+                    input_ids=src_ids,
+                    attention_mask=src_am,
+                    labels=lm_labels )
 
-                    outputs = learner(            
-                        input_ids=src_ids,
-                        attention_mask=src_am,
-                        labels=lm_labels )
+                test_loss = outputs[0]
 
-                    test_loss = outputs[0]
+                meta_train_loss += test_loss
 
-                    meta_train_loss += test_loss
+        optimizer.zero_grad()
+        meta_train_loss.backward()
+        optimizer.step()
 
-            optimizer.zero_grad()
-            meta_train_loss.backward()
-            optimizer.step()
-
-#            if e % 5 == 0:
-            preds, actuals = validate( tokenizer, model, device, test_loader )
+        if e % 10 == 0:
+            preds, actuals = validate( tokenizer, model, device, real_test_loader )
             prev_acc = acc
             acc = sum(preds == actuals) / len(actuals)
 
             if acc > prev_acc:
                 best_results[k] = acc
 
-            #print( '\tAcc updated!' )
+        print( f'\tk={k}, e={e}, meta_train_loss: {meta_train_loss}, acc={acc}')
 
-            print( f'\t{k}:{e}: meta_train_loss: {meta_train_loss}, acc={acc}')
-    
     print("\n============================\n")
     break
 

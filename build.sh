@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH --partition=gpu
-#SBATCH -J t5_scan
-#SBATCH -o ./metalog.out # STDOUT
+#SBATCH -J t5_scan_k16_new
+#SBATCH -o ./eall_900_log.out # STDOUT
 
-#SBATCH -t 48:00:00
+#SBATCH -t 72:00:00
 #SBATCH --ntasks=1
 #SBATCH --mem=20G
 #SBATCH --cpus-per-task=30
@@ -13,6 +13,7 @@
 
 echo "Started..."
 
-python -u ml_t5_exp1b.py
+python -u t5_exp1b.py
+#python -u t5_exp1b.py
 
 echo "Ended."

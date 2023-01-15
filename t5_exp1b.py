@@ -13,24 +13,6 @@ import numpy as np
 import learn2learn as l2l
 import Lang
 
-# scan_ds = load_dataset('scan', 'simple')
-
-# seq_vocab = Lang.Lang('seq_vocab')
-# cmd_vocab = Lang.Lang('cmd_vocab')
-# print(scan_ds['train']) 
-# for sentence in scan_ds['train']['commands']:
-#     seq_vocab.add_sentence(sentence)
-# for sentence in scan_ds['test']['commands']:
-#     seq_vocab.add_sentence(sentence)
-
-# for cmd in scan_ds['train']['actions']:
-#     cmd_vocab.add_sentence(cmd)
-# for cmd in scan_ds['test']['actions']:
-#     cmd_vocab.add_sentence(cmd)
-
-# seq_vocab.print()
-# cmd_vocab.print()
-
 # read file names in directory
 directory = '../SCAN/simple_split/size_variations/'
 paths = []
@@ -190,14 +172,8 @@ device = torch.device("cpu")
 if torch.cuda.is_available():    
     device = torch.device("cuda")
 
-epochs = 300
 print( "Started training...")
-best_acc = 0.0
 
-torch.autograd.set_detect_anomaly(True)
-K = 100
-alpha = 0.01
-beta = 1e-5 #0.001
 
 config = T5Config(
     vocab_size = tokenizer.vocab_size,
@@ -238,14 +214,17 @@ def validate( tokenizer, model, device, loader ):
   return np.array( predictions ), np.array( actuals )
 
 best_results = {}
+epochs = 900
 
 for k in datasets_wrapper.keys():
-    k = 1
+    
+    if k == 1:
+        continue
+
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
-    optimizer = torch.optim.AdamW( model.parameters(), lr=beta)
-    adapt_steps = 1
+    optimizer = torch.optim.AdamW( model.parameters(), lr=1e-5)
 
     train, test = datasets_wrapper[k] 
 
@@ -294,12 +273,9 @@ for k in datasets_wrapper.keys():
 
             if acc > prev_acc:
                 best_results[k] = acc
-
-            print( '\tAcc updated!' )
-
-        print( f'\t{k}:{e}: meta_train_loss: {meta_train_loss}, acc={acc}')
+            
+            print( f'\tk={k}, e={e}, meta_train_loss: {meta_train_loss}, acc={acc}')
     
     print("\n============================\n")
-    break
 
 print( f'best_results={best_results}' )
