@@ -88,13 +88,13 @@ for k in datasets.keys():
 model_name = 't5-small'
 
 tokenizer = T5Tokenizer( 'm.model', do_lower_case=True, do_basic_tokenize=True, 
-                               padding=True, bos_token="<s>", 
-                               eos_token="</s>",unk_token="<unk>", 
+                               padding=True, bos_token="<start>", 
+                               eos_token="<end>", unk_token="<unk>", 
                                pad_token="<pad>")
 
 SPECIAL_TOKENS_DICT = {
     'pad_token' : '<pad>',
-    'additional_special_tokens' : ['<s>', '</s>']
+    'additional_special_tokens' : ['<start>', '<end>']
 }
 
 tokenizer.add_special_tokens( SPECIAL_TOKENS_DICT ) 
@@ -132,7 +132,8 @@ def collate_fn( input ):
         #print( f'seq: {tokenizer.encode_plus(seq)} cmds: {len(cmds.split())}')
 
         source_dict = tokenizer.encode_plus(
-                            seq + " </s>", # Sentence to encode.
+                            seq, # Sentence to encode.
+                            add_special_tokens = False, # Add '[CLS]' and '[SEP]'
                             max_length = max_len_seq,      # Pad & truncate all sentences.
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
@@ -141,22 +142,25 @@ def collate_fn( input ):
                     )
 
         target_dict = tokenizer.encode_plus(
-                            cmds + " </s>", # Sentence to encode.
-                            max_length = max_len_cmds,      # Pad & truncate all sentences.
+                            cmds + '<end>', # Sentence to encode.
+                            max_length = max_len_cmds + 1,      # Pad & truncate all sentences.
+                            add_special_tokens = False, # Add '[CLS]' and '[SEP]'
                             padding = 'max_length',
                             return_attention_mask = True,   # Construct attn. masks.
                             truncation = True,
                             return_tensors = 'pt',     # Return pytorch tensors.
                     )
+ 
+        # print( f'source_dict[input_ids]: {tokenizer.decode(source_dict["input_ids"][0])}' )
+        # print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
 
-        #print( f'target_dict[input_ids]: {tokenizer.decode(target_dict["input_ids"][0])}' )
+        # exit()
 
         src_input_ids.append( source_dict['input_ids'] )
         src_attention_masks.append( source_dict['attention_mask'] )
 
         trg_input_ids.append( target_dict['input_ids'] )
         trg_attention_masks.append( target_dict['attention_mask'] )
-
 
     src_input_ids = torch.cat(src_input_ids, dim=0 )    
     src_attention_masks = torch.cat(src_attention_masks, dim=0)
@@ -178,8 +182,10 @@ print( "Started training...")
 config = T5Config(
     vocab_size = tokenizer.vocab_size,
     pad_token_id = tokenizer.pad_token_id,
+    bos_token_id = tokenizer.bos_token_id,
     eos_token_id = tokenizer.eos_token_id,
-    decoder_start_token_id = tokenizer.pad_token_id,
+    decoder_start_token_id = tokenizer.bos_token_id,
+    decoder_end_token_id = tokenizer.eos_token_id,
     #d_model = 300
 )
 
@@ -189,9 +195,14 @@ def validate( tokenizer, model, device, loader ):
 
   predictions = []
   actuals = []
-  
+    
+  #print( tokenizer.encode("run and walk look after opposite turn left right twice thrice around jump")  )
+  #exit()
+  just_one_prediction = False
   with torch.no_grad():
-        for _, data in enumerate(loader, 0):
+        for _, data in enumerate(loader):
+            #print(data[2])
+            #exit()
             src_ids = data[0].to(device)
             src_am  = data[1].to(device)
             trg_ids = data[2].to(device)
@@ -200,31 +211,41 @@ def validate( tokenizer, model, device, loader ):
                 input_ids = src_ids,
                 attention_mask = src_am, 
                 max_length=60, 
-                num_beams=2,
-                #repetition_penalty=2.5, 
-                #length_penalty=1.0, 
-                early_stopping=True
+                num_beams=10,
+                repetition_penalty=2.5,
+                #diversity_penalty=1.0, 
+                length_penalty=1.0, 
+                early_stopping=True,
+                #num_beam_groups=2,
+                #suppress_tokens=tokenizer.encode("run and walk look after opposite turn left right twice thrice around jump")
                 )
+
+
             preds = [tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True) for g in generated_ids]
-            target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True)for t in trg_ids]
-                        
+            target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True) for t in trg_ids]
+
+            if not just_one_prediction:
+                dirty_preds = [tokenizer.decode(g) for g in generated_ids]
+                target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True) for t in trg_ids]
+
+                print( f'dirty_preds: {dirty_preds} target={target}' )
+                just_one_prediction = True
+
             predictions.extend(preds)
             actuals.extend(target)
+            break
 
   return np.array( predictions ), np.array( actuals )
 
 best_results = {}
-epochs = 900
+epochs = 5000
 
-for k in datasets_wrapper.keys():
+for k in [1]: #sorted( datasets_wrapper.keys() ):
     
-    if k == 1:
-        continue
-
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
-    optimizer = torch.optim.AdamW( model.parameters(), lr=1e-5)
+    optimizer = torch.optim.AdamW( model.parameters(), lr=1e-6)
 
     train, test = datasets_wrapper[k] 
 
@@ -256,7 +277,12 @@ for k in datasets_wrapper.keys():
             outputs = model(            
                 input_ids=src_ids,
                 attention_mask=src_am,
-                labels=lm_labels )
+                #decoder_input_ids=trg_ids,
+                labels=lm_labels 
+                )
+
+            #print( outputs )
+            #exit()
 
             train_loss = outputs[0]
 

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --partition=gpu
-#SBATCH -J t5_scan_k16_new
-#SBATCH -o ./eall_900_log.out # STDOUT
+#SBATCH -J t5_1e6
+#SBATCH -o ./_1e6_5000_log.out # STDOUT
 
 #SBATCH -t 72:00:00
 #SBATCH --ntasks=1
