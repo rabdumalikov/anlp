@@ -85,12 +85,10 @@ datasets_wrapper = {}
 for k in datasets.keys():
     datasets_wrapper[k] = (MyDataset( datasets[k][0] ), MyDataset( datasets[k][1] ) )
     
-model_name = 't5-small'
-
 tokenizer = T5Tokenizer( 'm.model', do_lower_case=True, do_basic_tokenize=True, 
-                               padding=True, bos_token="<start>", 
-                               eos_token="<end>", unk_token="<unk>", 
-                               pad_token="<pad>")
+                        padding=True, bos_token="<start>", 
+                        eos_token="<end>", unk_token="<unk>", 
+                        pad_token="<pad>")
 
 SPECIAL_TOKENS_DICT = {
     'pad_token' : '<pad>',
@@ -184,10 +182,7 @@ config = T5Config(
     pad_token_id = tokenizer.pad_token_id,
     bos_token_id = tokenizer.bos_token_id,
     eos_token_id = tokenizer.eos_token_id,
-    decoder_start_token_id = tokenizer.bos_token_id,
-    decoder_end_token_id = tokenizer.eos_token_id,
-    #d_model = 300
-)
+    decoder_start_token_id = tokenizer.bos_token_id)
 
 def validate( tokenizer, model, device, loader ):
 
@@ -225,27 +220,23 @@ def validate( tokenizer, model, device, loader ):
             target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True) for t in trg_ids]
 
             if not just_one_prediction:
-                dirty_preds = [tokenizer.decode(g) for g in generated_ids]
-                target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True) for t in trg_ids]
-
-                print( f'dirty_preds: {dirty_preds} target={target}' )
+                #print( f'preds: {preds} target={target}' )
                 just_one_prediction = True
 
             predictions.extend(preds)
-            actuals.extend(target)
-            break
+            actuals.extend(target)            
 
   return np.array( predictions ), np.array( actuals )
 
 best_results = {}
 epochs = 5000
 
-for k in [1]: #sorted( datasets_wrapper.keys() ):
+for k in [4]: #sorted( datasets_wrapper.keys() ):
     
     model = T5ForConditionalGeneration( config ).to(device)
     model.resize_token_embeddings( len(tokenizer) )
 
-    optimizer = torch.optim.AdamW( model.parameters(), lr=1e-6)
+    optimizer = torch.optim.AdamW( model.parameters(), lr=1e-5)
 
     train, test = datasets_wrapper[k] 
 
@@ -292,7 +283,7 @@ for k in [1]: #sorted( datasets_wrapper.keys() ):
             train_loss.backward()
             optimizer.step()
 
-        if e % 5 == 0:
+        if e % 50 == 0:
             preds, actuals = validate( tokenizer, model, device, test_loader )
             prev_acc = acc
             acc = sum(preds == actuals) / len(actuals)
